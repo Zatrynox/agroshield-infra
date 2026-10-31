@@ -1,5 +1,7 @@
 # Infraestructura — AgroShield
 
+[![CI](https://github.com/Zatrynox/agroshield-infra/actions/workflows/ci.yml/badge.svg)](https://github.com/Zatrynox/agroshield-infra/actions/workflows/ci.yml)
+
 Dockerfiles, Compose y Caddy para ejecutar el monorepo en local, en desarrollo con hot reload y en producción. El objetivo es **un solo origen**: la landing en `/`, el panel en `/app`, la API en `/api` y la documentación en `/docs` (solo local).
 
 > **Repositorio de infraestructura.** Se extrae del monorepo [`Zatrynox/agroshield`](https://github.com/Zatrynox/agroshield), que sigue siendo la fuente de verdad y el contexto de build de las imágenes. Este repositorio conserva la carpeta `infra/`, los Compose y el validador para revisar y reutilizar la topología; no incluye el código de la API, el panel ni la landing. Para construir y levantar el stack completo, usa el monorepo. Aquí se valida la configuración de forma estática y con Docker.
