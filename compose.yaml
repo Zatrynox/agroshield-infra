@@ -1,0 +1,223 @@
+# Local, self-contained demo stack.
+#
+#   docker compose --env-file .env -f compose.yaml up -d --build
+#   # or: pnpm stack:up
+#
+# One origin: http://localhost:8080/ (landing), /app (panel), /api (API),
+# /docs (OpenAPI, local only). Postgres and the backend are never published.
+#
+# This stack is demo-only: the seed service is deliberately part of the startup
+# path and the backend refuses DEMO_MODE=true under NODE_ENV=production.
+
+name: agroshield-local
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-backend-environment: &backend-environment
+  NODE_ENV: development
+  APP_ENV: development
+  DEMO_MODE: "true"
+  API_HOST: 0.0.0.0
+  API_PORT: "3000"
+  DATABASE_URL: postgresql://${POSTGRES_USER:-agroshield}:${POSTGRES_PASSWORD:-local-only-db-password}@db:5432/${POSTGRES_DB:-agroshield}
+  AUTO_MIGRATE: "true"
+  SESSION_SECRET: ${SESSION_SECRET:-local-only-session-secret-0123456789abcdef0123456789abcdef}
+  SESSION_TTL_HOURS: "8"
+  COOKIE_SECURE: "false"
+  CORS_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+  TRUST_PROXY: "true"
+  ENABLE_API_DOCS: "true"
+  LOG_LEVEL: info
+  DEMO_PASSWORD: ${DEMO_PASSWORD:-Demo-AgroShield-2026!}
+  DEMO_SENSOR_KEY_DIR: /app/.data/demo-keys
+  PUBLIC_API_URL: http://backend:3000
+  SIMULATOR_INTERVAL_MS: "15000"
+
+x-backend-build: &backend-build
+  context: .
+  dockerfile: infra/docker/backend.Dockerfile
+
+x-web-build-args: &web-build-args
+  PUBLIC_SITE_NAME: AgroShield
+  PUBLIC_LANDING_URL: http://localhost:8080
+  PUBLIC_APP_URL: http://localhost:8080/app
+  PUBLIC_SUPPORT_EMAIL: ${PUBLIC_SUPPORT_EMAIL:-}
+  PUBLIC_WHATSAPP_NUMBER: ${PUBLIC_WHATSAPP_NUMBER:-}
+  PUBLIC_DEMO_MODE: "true"
+  PUBLIC_LEGAL_ENTITY: ${PUBLIC_LEGAL_ENTITY:-AgroShield, entorno local}
+  PUBLIC_LEGAL_ADDRESS: ${PUBLIC_LEGAL_ADDRESS:-}
+
+services:
+  db:
+    image: postgres:17.6-alpine3.22@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agroshield}
+      POSTGRES_USER: ${POSTGRES_USER:-agroshield}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-only-db-password}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    shm_size: 128mb
+    cpus: "1.0"
+    mem_limit: 1g
+
+  # One-shot demo seed. It waits for Postgres, recreates the demo organization
+  # and exits. The backend only starts after this completes successfully, so a
+  # fresh `up` gives a working demo login without manual steps.
+  seed:
+    image: agroshield-backend:local
+    build: *backend-build
+    command: ["node", "dist/tools/seed.js"]
+    environment:
+      <<: *backend-environment
+    volumes:
+      - demo-secrets:/app/.data
+    networks:
+      - data
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+
+  backend:
+    image: agroshield-backend:local
+    build: *backend-build
+    environment:
+      <<: *backend-environment
+    networks:
+      - app
+      - data
+    depends_on:
+      db:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+    cpus: "1.0"
+    mem_limit: 512m
+
+  web:
+    image: agroshield-web:local
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+      args:
+        <<: *web-build-args
+    environment:
+      WEB_PORT: "8080"
+      API_UPSTREAM: backend:3000
+      LANDING_ROOT: /srv/landing
+      APP_ROOT: /srv/app
+    ports:
+      - "8080:8080"
+    networks:
+      - edge
+      - app
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -o /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+    cpus: "0.5"
+    mem_limit: 256m
+
+  # Optional demo traffic. Runs only when explicitly requested:
+  #   docker compose --profile tools run --rm simulator
+  #   SIMULATOR_ONCE=true docker compose --profile tools run --rm simulator
+  simulator:
+    image: agroshield-backend:local
+    build: *backend-build
+    command: ["node", "dist/tools/sensor-simulator.js"]
+    profiles: ["tools"]
+    environment:
+      <<: *backend-environment
+      SIMULATOR_ONCE: ${SIMULATOR_ONCE:-false}
+    volumes:
+      - demo-secrets:/app/.data:ro
+    networks:
+      - app
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+
+networks:
+  edge:
+  app:
+    internal: true
+  data:
+    internal: true
+
+volumes:
+  db-data:
+  demo-secrets:
+  caddy-data:
+  caddy-config:

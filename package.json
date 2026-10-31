@@ -1,0 +1,16 @@
+{
+  "name": "@agroshield/infra",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.1.2",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "verify:infra": "node scripts/validate-infra.mjs"
+  },
+  "devDependencies": {
+    "yaml": "^2.9.1"
+  }
+}

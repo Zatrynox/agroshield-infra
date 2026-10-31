@@ -1,0 +1,194 @@
+# Production stack. HTTPS is terminated by Caddy, which also serves the
+# landing (/), the Vue panel (/app) and proxies the API (/api) on one origin.
+#
+# Required:
+#   cp infra/env/prod.env.example infra/env/prod.env
+#   # fill every value, then:
+#   docker compose --env-file infra/env/prod.env -f compose.prod.yaml up -d --build
+#
+# There is no demo seed and no simulator here. The migrate service runs once
+# before the backend starts; the backend itself refuses demo mode and insecure
+# cookies when NODE_ENV=production.
+
+name: agroshield-prod
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+x-backend-environment: &backend-environment
+  NODE_ENV: production
+  APP_ENV: production
+  DEMO_MODE: "false"
+  API_HOST: 0.0.0.0
+  API_PORT: "3000"
+  DATABASE_URL: ${PROD_DATABASE_URL:?Set PROD_DATABASE_URL in infra/env/prod.env}
+  AUTO_MIGRATE: "false"
+  SESSION_SECRET: ${PROD_SESSION_SECRET:?Set PROD_SESSION_SECRET in infra/env/prod.env}
+  SESSION_TTL_HOURS: "8"
+  COOKIE_SECURE: "true"
+  CORS_ORIGINS: https://${PROD_SITE_DOMAIN:?Set PROD_SITE_DOMAIN in infra/env/prod.env}
+  TRUST_PROXY: "true"
+  ENABLE_API_DOCS: "false"
+  LOG_LEVEL: info
+
+x-backend-build: &backend-build
+  context: .
+  dockerfile: infra/docker/backend.Dockerfile
+
+x-backend-security: &backend-security
+  restart: unless-stopped
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging: *default-logging
+
+services:
+  db:
+    image: postgres:17.6-alpine3.22@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    environment:
+      POSTGRES_DB: ${PROD_POSTGRES_DB:-agroshield}
+      POSTGRES_USER: ${PROD_POSTGRES_USER:-agroshield}
+      POSTGRES_PASSWORD: ${PROD_POSTGRES_PASSWORD:?Set PROD_POSTGRES_PASSWORD in infra/env/prod.env}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    networks:
+      - data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+    shm_size: 256mb
+    cpus: "2.0"
+    mem_limit: 2g
+
+  migrate:
+    image: agroshield-backend:prod
+    build: *backend-build
+    command: ["node", "dist/tools/migrate.js"]
+    environment:
+      <<: *backend-environment
+    networks:
+      - data
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+
+  backend:
+    image: agroshield-backend:prod
+    build: *backend-build
+    environment:
+      <<: *backend-environment
+    networks:
+      - app
+      - data
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    <<: *backend-security
+    cpus: "1.5"
+    mem_limit: 768m
+
+  web:
+    image: agroshield-web:prod
+    build:
+      context: .
+      dockerfile: infra/docker/web.Dockerfile
+      args:
+        PUBLIC_SITE_NAME: AgroShield
+        PUBLIC_LANDING_URL: https://${PROD_SITE_DOMAIN:?Set PROD_SITE_DOMAIN in infra/env/prod.env}
+        PUBLIC_APP_URL: https://${PROD_SITE_DOMAIN:?Set PROD_SITE_DOMAIN in infra/env/prod.env}/app
+        PUBLIC_SUPPORT_EMAIL: ${PROD_SUPPORT_EMAIL:-}
+        PUBLIC_WHATSAPP_NUMBER: ${PROD_WHATSAPP_NUMBER:-}
+        PUBLIC_DEMO_MODE: "false"
+        PUBLIC_LEGAL_ENTITY: ${PROD_LEGAL_ENTITY:?Set PROD_LEGAL_ENTITY in infra/env/prod.env}
+        PUBLIC_LEGAL_ADDRESS: ${PROD_LEGAL_ADDRESS:?Set PROD_LEGAL_ADDRESS in infra/env/prod.env}
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile.prod", "--adapter", "caddyfile"]
+    environment:
+      SITE_ADDRESS: https://${PROD_SITE_DOMAIN:?Set PROD_SITE_DOMAIN in infra/env/prod.env}
+      SITE_DOMAIN: ${PROD_SITE_DOMAIN:?Set PROD_SITE_DOMAIN in infra/env/prod.env}
+      ACME_EMAIL: ${PROD_ACME_EMAIL:?Set PROD_ACME_EMAIL in infra/env/prod.env}
+      API_UPSTREAM: backend:3000
+      LANDING_ROOT: /srv/landing
+      APP_ROOT: /srv/app
+    ports:
+      - "80:8080"
+      - "443:8443"
+    networks:
+      - edge
+      - app
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -fsS --resolve \"$${SITE_DOMAIN}:8443:127.0.0.1\" \"https://$${SITE_DOMAIN}:8443/healthz\" > /dev/null",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 90s
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging: *default-logging
+    cpus: "0.5"
+    mem_limit: 256m
+
+networks:
+  edge:
+  app:
+    internal: true
+  data:
+    internal: true
+
+volumes:
+  db-data:
+  caddy-data:
+  caddy-config:

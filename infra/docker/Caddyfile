@@ -1,0 +1,118 @@
+# Local / self-contained web image.
+#
+# One origin serves:
+#   /       -> Astro landing
+#   /app    -> Vue app (built with VITE_PUBLIC_BASE=/app/)
+#   /api    -> Fastify API (the /api prefix is stripped)
+#   /docs   -> OpenAPI UI (local/demo only; the backend disables it in prod)
+#
+# This file is deliberately HTTP-only. Production uses Caddyfile.prod, which
+# terminates TLS and adds HSTS.
+
+# Shared by every response, including errors. Site-level `header` directives
+# are deferred, but they are not inherited by `handle_errors`, so the snippet is
+# imported there too.
+(agroshield_security) {
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; font-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; worker-src 'self' blob:; connect-src 'self'"
+	}
+}
+
+{
+	admin off
+	persist_config off
+}
+
+:{$WEB_PORT:8080} {
+	encode zstd gzip
+	import agroshield_security
+
+	route {
+		handle /healthz {
+			respond "ok" 200
+		}
+
+		# API. The browser only ever talks to this origin, so the session cookie
+		# and the CSRF token stay same-site and no CORS preflight is needed.
+		handle /api/* {
+			uri strip_prefix /api
+			header Cache-Control "no-store"
+			reverse_proxy {$API_UPSTREAM:127.0.0.1:3000}
+		}
+
+		# Fastify Swagger UI uses absolute /docs and /documentation paths.
+		handle /docs* {
+			header Cache-Control "no-store"
+			reverse_proxy {$API_UPSTREAM:127.0.0.1:3000}
+		}
+		handle /documentation* {
+			header Cache-Control "no-store"
+			reverse_proxy {$API_UPSTREAM:127.0.0.1:3000}
+		}
+
+		# A bare /app has no index.html of its own. Keep the trailing slash so
+		# Vite's base path and the Vue Router history base stay aligned, and
+		# preserve any query string (for example /app?utm_source=...).
+		@appWithQuery {
+			path /app
+			expression {http.request.uri.query} != ""
+		}
+		redir @appWithQuery /app/?{http.request.uri.query} 308
+		redir /app /app/ 308
+
+		# Vite emits content-hashed assets under /app/assets.
+		handle /app/assets/* {
+			uri strip_prefix /app
+			root * {$APP_ROOT:/srv/app}
+			header Cache-Control "public, max-age=31536000, immutable"
+			file_server
+		}
+
+		# Vue Router history mode: unknown app paths fall back to index.html.
+		handle /app/* {
+			uri strip_prefix /app
+			root * {$APP_ROOT:/srv/app}
+			header Cache-Control "no-cache"
+			try_files {path} /index.html
+			file_server
+		}
+
+		# Astro emits content-hashed assets under /_astro.
+		handle /_astro/* {
+			root * {$LANDING_ROOT:/srv/landing}
+			header Cache-Control "public, max-age=31536000, immutable"
+			file_server
+		}
+
+		handle {
+			root * {$LANDING_ROOT:/srv/landing}
+			header Cache-Control "no-cache"
+			try_files {path} {path}/index.html {path}.html
+			file_server
+		}
+	}
+
+	# Astro's real 404 page for unknown landing routes (including missing app
+	# assets). API and docs paths keep their own status bodies. Errors are never
+	# cacheable and must still carry the security headers that the deferred
+	# site-level header does not reach.
+	handle_errors {
+		import agroshield_security
+		header Cache-Control "no-store"
+
+		@landing404 {
+			expression {http.error.status_code} == 404
+			not path /api/* /docs* /documentation*
+		}
+		rewrite @landing404 /404.html
+		root * {$LANDING_ROOT:/srv/landing}
+		file_server
+	}
+}

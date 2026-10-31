@@ -1,0 +1,179 @@
+# Development stack with hot reload.
+#
+#   docker compose -f compose.dev.yaml up
+#   # once the db is healthy, seed the demo data (no .env file required):
+#   docker compose -f compose.dev.yaml exec backend pnpm --filter @agroshield/backend exec tsx src/tools/seed.ts
+#
+# Ports: landing 4321, app 5173, API 3000, Postgres 127.0.0.1:5432.
+# Each service keeps dependencies in named volumes while the repository is bind
+# mounted, so edits reload without reinstalling.
+
+name: agroshield-dev
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-dev-build: &dev-build
+  context: .
+  dockerfile: infra/docker/dev.Dockerfile
+
+x-dev-volumes: &dev-volumes
+  - .:/workspace
+  - node_modules:/workspace/node_modules
+  - backend_node_modules:/workspace/backend/node_modules
+  - frontend_node_modules:/workspace/frontend/node_modules
+  - landing_node_modules:/workspace/landing/node_modules
+  - tokens_node_modules:/workspace/packages/design-tokens/node_modules
+
+x-dev-environment: &dev-environment
+  NODE_ENV: development
+  APP_ENV: development
+  DEMO_MODE: "true"
+  DATABASE_URL: postgresql://${POSTGRES_USER:-agroshield}:${POSTGRES_PASSWORD:-local-only-db-password}@db:5432/${POSTGRES_DB:-agroshield}
+  AUTO_MIGRATE: "true"
+  SESSION_SECRET: ${SESSION_SECRET:-local-only-session-secret-0123456789abcdef0123456789abcdef}
+  SESSION_TTL_HOURS: "8"
+  COOKIE_SECURE: "false"
+  CORS_ORIGINS: http://localhost:5173,http://127.0.0.1:5173,http://localhost:4321,http://127.0.0.1:4321
+  TRUST_PROXY: "false"
+  ENABLE_API_DOCS: "true"
+  LOG_LEVEL: debug
+  DEMO_PASSWORD: ${DEMO_PASSWORD:-Demo-AgroShield-2026!}
+  DEMO_SENSOR_KEY_DIR: /workspace/.data/demo-keys
+  PUBLIC_LANDING_URL: http://localhost:4321
+  PUBLIC_APP_URL: http://localhost:5173
+  PUBLIC_DEMO_MODE: "true"
+  PUBLIC_API_URL: http://backend:3000
+  PUBLIC_API_PROXY_TARGET: http://backend:3000
+  VITE_DEV_API_TARGET: http://backend:3000
+  VITE_LANDING_URL: http://localhost:4321
+
+services:
+  db:
+    image: postgres:17.6-alpine3.22@sha256:ef257d85f76e48da1c64832459b59fcaba1a4dac97bf5d7450c77753542eee94
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-agroshield}
+      POSTGRES_USER: ${POSTGRES_USER:-agroshield}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-only-db-password}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      - db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  backend:
+    image: agroshield-dev:local
+    build: *dev-build
+    command: ["pnpm", "--filter", "@agroshield/backend", "exec", "tsx", "watch", "src/main.ts"]
+    environment:
+      <<: *dev-environment
+      API_HOST: 0.0.0.0
+      API_PORT: "3000"
+    ports:
+      - "3000:3000"
+    volumes: *dev-volumes
+    networks:
+      - app
+      - db
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then((r) => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  frontend:
+    image: agroshield-dev:local
+    build: *dev-build
+    command: ["pnpm", "--filter", "@agroshield/frontend", "exec", "vite", "--host", "0.0.0.0"]
+    environment:
+      <<: *dev-environment
+      VITE_DEV_API_TARGET: http://backend:3000
+      VITE_LANDING_URL: http://localhost:4321
+    ports:
+      - "5173:5173"
+    volumes: *dev-volumes
+    networks:
+      - app
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:5173/ > /dev/null"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  landing:
+    image: agroshield-dev:local
+    build: *dev-build
+    command: ["pnpm", "--filter", "@agroshield/landing", "exec", "astro", "dev", "--host", "0.0.0.0", "--port", "4321"]
+    environment:
+      <<: *dev-environment
+      PUBLIC_API_PROXY_TARGET: http://backend:3000
+    ports:
+      - "4321:4321"
+    volumes: *dev-volumes
+    networks:
+      - app
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:4321/ > /dev/null"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+    init: true
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+networks:
+  app:
+  db:
+    internal: true
+
+volumes:
+  db-data:
+  node_modules:
+  backend_node_modules:
+  frontend_node_modules:
+  landing_node_modules:
+  tokens_node_modules:

@@ -1,0 +1,55 @@
+# Keep the Docker build context small and free of local secrets and artifacts.
+# The production images build from the repository root.
+
+.git
+.github
+.gitignore
+.gitattributes
+.dockerignore
+
+node_modules
+**/node_modules
+**/dist
+**/build
+**/.astro
+**/.vite
+**/coverage
+**/*.tsbuildinfo
+**/.turbo
+
+# Never ship environment files. Only the checked-in examples are allowed.
+.env
+**/.env
+**/.env.*
+!**/.env.example
+
+# Local runtime data, keys and certificates.
+.data
+**/.data
+infra/certs
+infra/secrets
+infra/env
+!infra/env/*.example
+
+# Documentation, QA evidence and local tooling.
+docs
+scripts
+skills-lock.json
+PRODUCT.md
+README.md
+backend-test-output.txt
+playwright-report
+test-results
+lighthouse
+
+# Agent/tool caches.
+.taste-skill
+.agents
+.opencode
+.absolute
+.cache
+.eslintcache
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini

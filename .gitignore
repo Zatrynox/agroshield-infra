@@ -1,0 +1,16 @@
+node_modules/
+.pnpm-store/
+*.log
+
+# real environment files and local secrets
+.env
+.env.*
+!.env.example
+infra/env/prod.env
+infra/certs/
+infra/secrets/
+*.pem
+*.key
+
+.DS_Store
+Thumbs.db

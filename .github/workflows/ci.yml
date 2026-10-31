@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+  NODE_VERSION: "24.15.0"
+  PNPM_VERSION: "11.1.2"
+  CADDY_IMAGE: caddy:2.11.7-alpine@sha256:eb4d35b7452d1ab6171fbdbe8d9275b2301dad6dad92115d91e19fb9b24d510f
+  PROD_SITE_DOMAIN: agroshield.example
+  PROD_ACME_EMAIL: ops@agroshield.example
+  PROD_POSTGRES_PASSWORD: ci-only-not-a-real-password
+  PROD_DATABASE_URL: postgresql://agroshield:ci-only-not-a-real-password@db:5432/agroshield
+  PROD_SESSION_SECRET: ci-only-session-secret-0123456789abcdef0123456789abcdef
+  PROD_LEGAL_ENTITY: AgroShield CI
+  PROD_LEGAL_ADDRESS: CI only
+
+jobs:
+  quality:
+    name: Static validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate infrastructure definitions
+        run: pnpm verify:infra
+
+  compose:
+    name: Compose and Caddy validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify Docker is available
+        run: docker run --rm hello-world
+
+      - name: Render the local stack
+        run: docker compose -f compose.yaml config -q
+
+      - name: Render the hot-reload stack
+        run: docker compose -f compose.dev.yaml config -q
+
+      - name: Render the production stack
+        run: docker compose -f compose.prod.yaml config -q
+
+      - name: Validate the local Caddyfile
+        run: |
+          docker run --rm \
+            -v "$PWD/infra/docker/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            -e WEB_PORT=8080 \
+            "$CADDY_IMAGE" caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+
+      - name: Validate the production Caddyfile
+        run: |
+          docker run --rm \
+            -v "$PWD/infra/docker/Caddyfile.prod:/etc/caddy/Caddyfile.prod:ro" \
+            -e SITE_ADDRESS=https://agroshield.example \
+            -e ACME_EMAIL=ops@agroshield.example \
+            -e API_UPSTREAM=backend:3000 \
+            "$CADDY_IMAGE" caddy validate --config /etc/caddy/Caddyfile.prod --adapter caddyfile
